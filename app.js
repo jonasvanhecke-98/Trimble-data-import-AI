@@ -1,143 +1,1016 @@
 (() => {
   "use strict";
+
+  // Later vervangen door je online backend-URL.
+  // Voor lokale tests:
   const BACKEND = "http://localhost:8000";
-  const channel = new BroadcastChannel("trimble-data-import-ai-v1");
+
   const insideTrimble = window.self !== window.top;
-  const $ = id => document.getElementById(id);
 
-  let api=null, project=null, token=null, explorerApi=null, ifcMeta=null, pdfMeta=null, mode="trimble", analysis=null;
+  const $ = (id) => document.getElementById(id);
 
-  $("excel-link").href = `${BACKEND}/api/audit.xlsx`;
+  let workspaceApi = null;
+  let explorerApi = null;
 
-  if (insideTrimble) startExtension();
-  else startCompanion();
+  let project = null;
+  let accessToken = null;
 
-  async function startExtension(){
-    $("extension-ui").hidden=false;
-    $("status").textContent="Verbinden met Trimble Connect…";
-    try{
-      api=await TrimbleConnectWorkspace.connect(window.parent,onEvent,30000);
-      project=await api.project.getProject();
-      channel.postMessage({type:"project",project});
-      const p=await api.extension.requestPermission("accesstoken");
-      if(typeof p==="string"&&p.length>20){token=p;channel.postMessage({type:"token",token});}
-      $("status").textContent=`Verbonden: ${project?.name||project?.id||"Trimble Connect"}`;
-      $("open-companion").onclick=()=>{
-        const u=new URL(location.href);u.searchParams.set("companion","1");
-        window.open(u.toString(),"trimble-data-import-ai-control","width=1450,height=950");
-      };
-      channel.addEventListener("message",e=>{
-        if(e.data?.type==="companion-ready"){
-          if(project) channel.postMessage({type:"project",project});
-          if(token) channel.postMessage({type:"token",token});
-        }
-        if(e.data?.type==="focus"&&e.data.guid) focusGuid(e.data.guid,e.data.modelId);
-      });
-    }catch(e){$("status").textContent="Trimble verbinding mislukt: "+(e?.message||e);}
+  let companionWindow = null;
+
+  let selectedIfc = null;
+  let selectedPdf = null;
+
+  let mode = "trimble";
+  let analysis = null;
+
+  if ($("excel-link")) {
+    $("excel-link").href = `${BACKEND}/api/audit.xlsx`;
   }
 
-  function onEvent(event,args){
-    const data=args?.data??args;
-    if(event==="extension.accessToken"&&typeof data==="string"&&data.length>20){
-      token=data;channel.postMessage({type:"token",token});
+  // ------------------------------------------------------------
+  // START
+  // ------------------------------------------------------------
+
+  if (insideTrimble) {
+    startExtension();
+  } else {
+    startCompanion();
+  }
+
+  // ============================================================
+  // TRIMBLE EXTENSION — SCHERM 1
+  // ============================================================
+
+  async function startExtension() {
+    $("extension-ui").hidden = false;
+    $("standalone-ui").hidden = true;
+
+    $("status").textContent = "Verbinden met Trimble Connect…";
+
+    try {
+      workspaceApi = await TrimbleConnectWorkspace.connect(
+        window.parent,
+        onWorkspaceEvent,
+        30000
+      );
+
+      // Huidig Trimble project
+      project = await workspaceApi.project.getProject();
+
+      // Vraag Trimble access token
+      try {
+        const permission =
+          await workspaceApi.extension.requestPermission("accesstoken");
+
+        if (
+          typeof permission === "string" &&
+          permission.length > 20
+        ) {
+          accessToken = permission;
+        }
+      } catch (error) {
+        console.warn("Access token permission:", error);
+      }
+
+      $("status").textContent =
+        `Verbonden: ${project?.name || project?.id || "Trimble Connect"}`;
+
+      // Knop om scherm 2 te openen
+      $("open-companion").addEventListener(
+        "click",
+        openCompanionWindow
+      );
+
+      // Berichten ontvangen vanuit scherm 2
+      window.addEventListener(
+        "message",
+        onCompanionMessage
+      );
+
+    } catch (error) {
+      console.error(error);
+
+      $("status").textContent =
+        `Trimble verbinding mislukt: ${error?.message || error}`;
     }
   }
 
-  async function focusGuid(guid,preferredModelId){
-    try{
-      const models=await api.viewer.getModels();
-      const search=preferredModelId?models.filter(m=>m.id===preferredModelId):models;
-      for(const model of (search.length?search:models)){
-        const found=await api.viewer.getObjects({modelObjectIds:[{modelId:model.id}],parameter:{properties:{GlobalId:guid}}});
-        if(!found?.length) continue;
-        const selector={modelObjectIds:found.map(g=>({modelId:g.modelId,objectIds:(g.objects||[]).map(o=>o.id||o.objectId||o.externalId).filter(Boolean)})).filter(x=>x.objectIds.length)};
-        if(selector.modelObjectIds.length){
-          await api.viewer.setSelection(selector,"set");
-          try{await api.viewer.setCamera(selector,{animationTime:350});}catch{}
+  // ------------------------------------------------------------
+  // Events die Trimble zelf naar de extension stuurt
+  // ------------------------------------------------------------
+
+  function onWorkspaceEvent(event, args) {
+    const data = args?.data ?? args;
+
+    // Access token kan ook via event binnenkomen
+    if (event === "extension.accessToken") {
+      if (
+        typeof data === "string" &&
+        data.length > 20
+      ) {
+        accessToken = data;
+
+        sendContextToCompanion();
+      }
+    }
+
+    if (event === "viewer.onSelectionChanged") {
+      sendToCompanion({
+        type: "viewer-selection",
+        data
+      });
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Open scherm 2
+  // ------------------------------------------------------------
+
+  function openCompanionWindow() {
+    const url = new URL(window.location.href);
+
+    url.searchParams.set("companion", "1");
+
+    companionWindow = window.open(
+      url.toString(),
+      "trimble-data-import-ai-control",
+      "width=1450,height=950"
+    );
+
+    // Companion meldt normaal zelf wanneer hij klaar is.
+    // Deze extra poging vangt trage loads op.
+    setTimeout(() => {
+      sendContextToCompanion();
+    }, 1000);
+  }
+
+  // ------------------------------------------------------------
+  // Bericht van scherm 2 naar Trimble extension
+  // ------------------------------------------------------------
+
+  async function onCompanionMessage(event) {
+    // Alleen eigen GitHub Pages origin toestaan
+    if (event.origin !== window.location.origin) {
+      return;
+    }
+
+    const message = event.data;
+
+    if (!message) return;
+
+    // Companion zegt: ik ben geladen
+    if (message.type === "companion-ready") {
+      // event.source is het geopende tweede venster
+      companionWindow = event.source;
+
+      sendContextToCompanion();
+
+      return;
+    }
+
+    // Companion vraagt om BIM-object te tonen
+    if (
+      message.type === "focus" &&
+      message.guid
+    ) {
+      await focusGuid(
+        message.guid,
+        message.modelId
+      );
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Stuur project + token naar scherm 2
+  // ------------------------------------------------------------
+
+  function sendContextToCompanion() {
+    sendToCompanion({
+      type: "trimble-context",
+      project,
+      token: accessToken
+    });
+  }
+
+  function sendToCompanion(message) {
+    if (
+      companionWindow &&
+      !companionWindow.closed
+    ) {
+      companionWindow.postMessage(
+        message,
+        window.location.origin
+      );
+    }
+  }
+
+  // ------------------------------------------------------------
+  // BIM object selecteren en naar toe zoomen
+  // ------------------------------------------------------------
+
+  async function focusGuid(
+    guid,
+    preferredModelId
+  ) {
+    if (!workspaceApi) return;
+
+    try {
+      const models =
+        await workspaceApi.viewer.getModels();
+
+      const preferred =
+        preferredModelId
+          ? models.filter(
+              (model) =>
+                model.id === preferredModelId
+            )
+          : [];
+
+      const modelsToSearch =
+        preferred.length
+          ? preferred
+          : models;
+
+      for (const model of modelsToSearch) {
+
+        const found =
+          await workspaceApi.viewer.getObjects({
+            modelObjectIds: [
+              {
+                modelId: model.id
+              }
+            ],
+            parameter: {
+              properties: {
+                GlobalId: guid
+              }
+            }
+          });
+
+        if (!found?.length) {
+          continue;
+        }
+
+        const selector = {
+          modelObjectIds:
+            found
+              .map((group) => ({
+                modelId: group.modelId,
+
+                objectIds:
+                  (group.objects || [])
+                    .map(
+                      (object) =>
+                        object.id ||
+                        object.objectId ||
+                        object.externalId
+                    )
+                    .filter(Boolean)
+              }))
+              .filter(
+                (group) =>
+                  group.objectIds.length
+              )
+        };
+
+        if (
+          selector.modelObjectIds.length
+        ) {
+          await workspaceApi.viewer.setSelection(
+            selector,
+            "set"
+          );
+
+          try {
+            await workspaceApi.viewer.setCamera(
+              selector,
+              {
+                animationTime: 350
+              }
+            );
+          } catch (error) {
+            console.warn(
+              "Camera zoom niet beschikbaar:",
+              error
+            );
+          }
+
           return;
         }
       }
-    }catch(e){console.error(e);}
+
+      console.warn(
+        "GUID niet gevonden in viewer:",
+        guid
+      );
+
+    } catch (error) {
+      console.error(
+        "focusGuid fout:",
+        error
+      );
+    }
   }
 
-  function startCompanion(){
-    $("standalone-ui").hidden=false;$("status").textContent="Controlevenster";
-    $("tab-trimble").onclick=()=>setMode("trimble");$("tab-local").onclick=()=>setMode("local");
-    $("analyze").onclick=analyze;$("confirm-high").onclick=confirmHigh;$("apply").onclick=applyConfirmed;
-    $("local-ifc").onchange=updateAnalyze;$("local-pdf").onchange=updateAnalyze;
-    channel.addEventListener("message",e=>{
-      if(e.data?.type==="token"){token=e.data.token;maybeExplorer();}
-      if(e.data?.type==="project"){project=e.data.project;maybeExplorer();}
-    });
-    channel.postMessage({type:"companion-ready"});
-    updateAnalyze();
+  // ============================================================
+  // COMPANION — SCHERM 2
+  // ============================================================
+
+  function startCompanion() {
+    $("extension-ui").hidden = true;
+    $("standalone-ui").hidden = false;
+
+    $("status").textContent =
+      "Controlevenster";
+
+    $("tab-trimble").addEventListener(
+      "click",
+      () => setMode("trimble")
+    );
+
+    $("tab-local").addEventListener(
+      "click",
+      () => setMode("local")
+    );
+
+    $("analyze").addEventListener(
+      "click",
+      analyze
+    );
+
+    $("confirm-high").addEventListener(
+      "click",
+      confirmHighConfidence
+    );
+
+    $("apply").addEventListener(
+      "click",
+      applyConfirmed
+    );
+
+    $("local-ifc").addEventListener(
+      "change",
+      updateAnalyzeButton
+    );
+
+    $("local-pdf").addEventListener(
+      "change",
+      updateAnalyzeButton
+    );
+
+    // Ontvang project/token uit Trimble extension
+    window.addEventListener(
+      "message",
+      onExtensionMessage
+    );
+
+    // Vertel opener dat scherm 2 klaar is
+    if (window.opener) {
+      window.opener.postMessage(
+        {
+          type: "companion-ready"
+        },
+        window.location.origin
+      );
+    }
+
+    updateAnalyzeButton();
   }
 
-  function setMode(m){
-    mode=m;$("trimble-pane").hidden=m!=="trimble";$("local-pane").hidden=m!=="local";updateAnalyze();
-  }
+  // ------------------------------------------------------------
+  // Bericht uit Trimble extension ontvangen
+  // ------------------------------------------------------------
 
-  async function maybeExplorer(){
-    if(!project?.id||!token||explorerApi)return;
-    try{
-      const iframe=$("trimble-explorer");iframe.src=TrimbleConnectWorkspace.getConnectEmbedUrl();
-      explorerApi=await TrimbleConnectWorkspace.connect(iframe,(event,args)=>{
-        if(event!=="extension.fileSelected")return;
-        const file=args?.data?.file||args?.file;if(!file||file.type!=="FILE")return;
-        const n=(file.name||"").toLowerCase();
-        if(n.endsWith(".ifc")){ifcMeta=file;$("ifc-name").textContent=file.name;}
-        if(n.endsWith(".pdf")){pdfMeta=file;$("pdf-name").textContent=file.name;}
-        updateAnalyze();
-      },30000);
-      await explorerApi.embed.setTokens({accessToken:token});
-      await explorerApi.embed.initFileExplorer({projectId:project.id,enableSelect:true,enableUploadFiles:false,enableCreateFolder:false,enableExplorerKebabMenu:false,fileTypeFilter:["ifc","pdf"]});
-      $("explorer-status").textContent=`Project: ${project.name||project.id}`;
-    }catch(e){$("explorer-status").textContent="Explorer fout: "+(e?.message||e);}
-  }
+  function onExtensionMessage(event) {
+    if (
+      event.origin !== window.location.origin
+    ) {
+      return;
+    }
 
-  function updateAnalyze(){
-    $("analyze").disabled=mode==="trimble"?!(token&&project?.id&&ifcMeta&&pdfMeta):!($("local-ifc").files?.[0]&&$("local-pdf").files?.[0]);
-  }
+    const message = event.data;
 
-  async function analyze(){
-    setMessage("Analyseren…");
-    try{
-      let r;
-      if(mode==="trimble"){
-        r=await fetch(`${BACKEND}/api/analyze/trimble`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({access_token:token,project_id:project.id,ifc_file:ifcMeta,pdf_file:pdfMeta})});
-      }else{
-        const f=new FormData();f.append("ifc",$("local-ifc").files[0]);f.append("pdf",$("local-pdf").files[0]);
-        r=await fetch(`${BACKEND}/api/analyze/local`,{method:"POST",body:f});
+    if (!message) return;
+
+    if (
+      message.type === "trimble-context"
+    ) {
+      project =
+        message.project || project;
+
+      accessToken =
+        message.token || accessToken;
+
+      if (
+        project?.id &&
+        accessToken
+      ) {
+        $("explorer-status").textContent =
+          `Verbonden met project: ${
+            project.name || project.id
+          }`;
+
+        initializeTrimbleExplorer();
       }
-      if(!r.ok)throw new Error(await r.text());
-      analysis=await r.json();renderResults();setMessage("");
-    }catch(e){setMessage(e?.message||String(e));}
+    }
+
+    if (
+      message.type ===
+      "viewer-selection"
+    ) {
+      console.log(
+        "Viewer selectie:",
+        message.data
+      );
+    }
   }
 
-  function renderResults(){
-    $("results").hidden=false;$("count-elements").textContent=analysis.element_count||0;$("count-assignments").textContent=analysis.assignment_count||0;$("count-proposals").textContent=analysis.rows?.length||0;
-    const body=$("results-body");body.innerHTML="";
-    (analysis.rows||[]).forEach((row,i)=>{
-      const tr=document.createElement("tr"),cc=row.confidence>=95?"green":row.confidence>=75?"amber":"red";
-      tr.innerHTML=`<td><b>${esc(row.element_ref||"—")}</b><small>${esc(row.guid)}</small></td><td><input data-v="${i}" value="${attr(row.value||"")}"></td><td><span class="conf ${cc}">${row.confidence}%</span></td><td>${esc(row.method||"")}</td><td><select data-s="${i}"><option value="proposed">Voorstel</option><option value="confirmed">Bevestigd</option><option value="needs_review">Controle nodig</option><option value="rejected">Afgewezen</option></select></td><td><button data-f="${i}">Bekijk</button></td>`;
-      body.appendChild(tr);tr.querySelector(`[data-s="${i}"]`).value=row.status||"proposed";
-    });
-    body.querySelectorAll("[data-v]").forEach(el=>el.oninput=e=>analysis.rows[+e.target.dataset.v].value=e.target.value);
-    body.querySelectorAll("[data-s]").forEach(el=>el.onchange=e=>{analysis.rows[+e.target.dataset.s].status=e.target.value;updateApply();});
-    body.querySelectorAll("[data-f]").forEach(el=>el.onclick=e=>{const r=analysis.rows[+e.target.dataset.f];channel.postMessage({type:"focus",guid:r.guid,modelId:r.model_id});});
-    updateApply();
+  // ------------------------------------------------------------
+  // Trimble / lokaal tabs
+  // ------------------------------------------------------------
+
+  function setMode(nextMode) {
+    mode = nextMode;
+
+    $("tab-trimble").classList.toggle(
+      "active",
+      mode === "trimble"
+    );
+
+    $("tab-local").classList.toggle(
+      "active",
+      mode === "local"
+    );
+
+    $("trimble-pane").hidden =
+      mode !== "trimble";
+
+    $("local-pane").hidden =
+      mode !== "local";
+
+    updateAnalyzeButton();
   }
 
-  function confirmHigh(){(analysis.rows||[]).forEach(r=>{if(r.confidence>=95)r.status="confirmed";});renderResults();}
-  function updateApply(){$("apply").disabled=!(analysis?.rows||[]).some(r=>r.status==="confirmed");}
-  async function applyConfirmed(){
-    if(!token||!project?.id){setMessage("Open dit venster vanuit de Trimble extension.");return;}
-    try{
-      const r=await fetch(`${BACKEND}/api/apply`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({access_token:token,project_id:project.id,model_name:analysis.model_name,rows:analysis.rows,confirmed_by:"Trimble user"})});
-      if(!r.ok)throw new Error(await r.text());const x=await r.json();setMessage(`Klaar: ${x.written||0} verwerkt. Mode: ${x.mode||"onbekend"}`);
-    }catch(e){setMessage(e?.message||String(e));}
+  // ============================================================
+  // TRIMBLE FILE EXPLORER
+  // ============================================================
+
+  async function initializeTrimbleExplorer() {
+    if (
+      !project?.id ||
+      !accessToken ||
+      explorerApi
+    ) {
+      return;
+    }
+
+    try {
+      $("explorer-status").textContent =
+        "Trimble File Explorer laden…";
+
+      const iframe =
+        $("trimble-explorer");
+
+      iframe.src =
+        TrimbleConnectWorkspace.getConnectEmbedUrl();
+
+      explorerApi =
+        await TrimbleConnectWorkspace.connect(
+          iframe,
+          onExplorerEvent,
+          30000
+        );
+
+      await explorerApi.embed.setTokens({
+        accessToken
+      });
+
+      await explorerApi.embed.initFileExplorer({
+        projectId: project.id,
+
+        enableSelect: true,
+
+        enableUploadFiles: false,
+
+        enableCreateFolder: false,
+
+        enableExplorerKebabMenu: false,
+
+        fileTypeFilter: [
+          "ifc",
+          "pdf"
+        ]
+      });
+
+      $("explorer-status").textContent =
+        `Project: ${
+          project.name || project.id
+        }`;
+
+    } catch (error) {
+      console.error(error);
+
+      $("explorer-status").textContent =
+        `Trimble File Explorer kon niet laden: ${
+          error?.message || error
+        }`;
+    }
   }
-  function setMessage(t){$("message").textContent=t||"";$("message").hidden=!t;}
-  function esc(v){return String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");}
-  function attr(v){return esc(v).replaceAll('"',"&quot;");}
+
+  // ------------------------------------------------------------
+  // File Explorer selectie
+  // ------------------------------------------------------------
+
+  function onExplorerEvent(event, args) {
+    if (
+      event !== "extension.fileSelected"
+    ) {
+      return;
+    }
+
+    const file =
+      args?.data?.file ||
+      args?.file;
+
+    if (
+      !file ||
+      file.type !== "FILE"
+    ) {
+      return;
+    }
+
+    const name =
+      (file.name || "")
+        .toLowerCase();
+
+    if (
+      name.endsWith(".ifc")
+    ) {
+      selectedIfc = file;
+
+      $("ifc-name").textContent =
+        file.name;
+    }
+
+    if (
+      name.endsWith(".pdf")
+    ) {
+      selectedPdf = file;
+
+      $("pdf-name").textContent =
+        file.name;
+    }
+
+    updateAnalyzeButton();
+  }
+
+  // ============================================================
+  // ANALYSE BUTTON STATE
+  // ============================================================
+
+  function updateAnalyzeButton() {
+    let enabled = false;
+
+    if (mode === "trimble") {
+      enabled = Boolean(
+        accessToken &&
+        project?.id &&
+        selectedIfc &&
+        selectedPdf
+      );
+    } else {
+      enabled = Boolean(
+        $("local-ifc").files?.[0] &&
+        $("local-pdf").files?.[0]
+      );
+    }
+
+    $("analyze").disabled =
+      !enabled;
+  }
+
+  // ============================================================
+  // ANALYSE
+  // ============================================================
+
+  async function analyze() {
+    setMessage("Analyseren…");
+
+    $("analyze").disabled = true;
+
+    try {
+      let response;
+
+      // --------------------------------
+      // Vanuit Trimble bestanden
+      // --------------------------------
+
+      if (mode === "trimble") {
+        response = await fetch(
+          `${BACKEND}/api/analyze/trimble`,
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json"
+            },
+
+            body: JSON.stringify({
+              access_token:
+                accessToken,
+
+              project_id:
+                project.id,
+
+              project_location:
+                project.location,
+
+              ifc_file:
+                selectedIfc,
+
+              pdf_file:
+                selectedPdf
+            })
+          }
+        );
+      }
+
+      // --------------------------------
+      // Lokale fallback
+      // --------------------------------
+
+      else {
+        const form =
+          new FormData();
+
+        form.append(
+          "ifc",
+          $("local-ifc").files[0]
+        );
+
+        form.append(
+          "pdf",
+          $("local-pdf").files[0]
+        );
+
+        response = await fetch(
+          `${BACKEND}/api/analyze/local`,
+          {
+            method: "POST",
+            body: form
+          }
+        );
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          await response.text()
+        );
+      }
+
+      analysis =
+        await response.json();
+
+      renderResults();
+
+      setMessage("");
+
+    } catch (error) {
+      setMessage(
+        error?.message ||
+        String(error)
+      );
+
+    } finally {
+      updateAnalyzeButton();
+    }
+  }
+
+  // ============================================================
+  // RESULTS
+  // ============================================================
+
+  function renderResults() {
+    $("results").hidden = false;
+
+    $("count-elements").textContent =
+      analysis.element_count ?? 0;
+
+    $("count-assignments").textContent =
+      analysis.assignment_count ?? 0;
+
+    $("count-proposals").textContent =
+      analysis.rows?.length ?? 0;
+
+    const body =
+      $("results-body");
+
+    body.innerHTML = "";
+
+    for (
+      const [index, row]
+      of (analysis.rows || []).entries()
+    ) {
+
+      const tr =
+        document.createElement("tr");
+
+      const confidenceClass =
+        row.confidence >= 95
+          ? "green"
+          : row.confidence >= 75
+            ? "amber"
+            : "red";
+
+      tr.innerHTML = `
+        <td>
+          <strong>
+            ${escapeHtml(row.element_ref || "—")}
+          </strong>
+
+          <small>
+            ${escapeHtml(row.guid)}
+          </small>
+        </td>
+
+        <td>
+          <input
+            data-role="value"
+            data-index="${index}"
+            value="${escapeAttribute(
+              row.value || ""
+            )}"
+          >
+        </td>
+
+        <td>
+          <span class="conf ${confidenceClass}">
+            ${Number(row.confidence || 0)}%
+          </span>
+        </td>
+
+        <td>
+          ${escapeHtml(row.method || "")}
+        </td>
+
+        <td>
+          <select
+            data-role="status"
+            data-index="${index}"
+          >
+            <option value="proposed">
+              Voorstel
+            </option>
+
+            <option value="confirmed">
+              Bevestigd
+            </option>
+
+            <option value="needs_review">
+              Controle nodig
+            </option>
+
+            <option value="rejected">
+              Afgewezen
+            </option>
+          </select>
+        </td>
+
+        <td>
+          <button
+            data-role="focus"
+            data-index="${index}"
+          >
+            Bekijk
+          </button>
+        </td>
+      `;
+
+      body.appendChild(tr);
+
+      const statusSelect =
+        tr.querySelector(
+          '[data-role="status"]'
+        );
+
+      statusSelect.value =
+        row.status || "proposed";
+    }
+
+    // Waarde aanpassen
+    body
+      .querySelectorAll(
+        '[data-role="value"]'
+      )
+      .forEach((element) => {
+        element.addEventListener(
+          "input",
+          (event) => {
+            const index =
+              Number(
+                event.target.dataset.index
+              );
+
+            analysis.rows[index].value =
+              event.target.value;
+          }
+        );
+      });
+
+    // Status aanpassen
+    body
+      .querySelectorAll(
+        '[data-role="status"]'
+      )
+      .forEach((element) => {
+        element.addEventListener(
+          "change",
+          (event) => {
+            const index =
+              Number(
+                event.target.dataset.index
+              );
+
+            analysis.rows[index].status =
+              event.target.value;
+
+            updateApplyButton();
+          }
+        );
+      });
+
+    // Bekijk in Trimble
+    body
+      .querySelectorAll(
+        '[data-role="focus"]'
+      )
+      .forEach((element) => {
+
+        element.addEventListener(
+          "click",
+          (event) => {
+
+            const index =
+              Number(
+                event.target.dataset.index
+              );
+
+            const row =
+              analysis.rows[index];
+
+            if (window.opener) {
+              window.opener.postMessage(
+                {
+                  type: "focus",
+                  guid: row.guid,
+                  modelId: row.model_id
+                },
+                window.location.origin
+              );
+            }
+          }
+        );
+      });
+
+    updateApplyButton();
+  }
+
+  // ============================================================
+  // CONFIRM HIGH CONFIDENCE
+  // ============================================================
+
+  function confirmHighConfidence() {
+    for (
+      const row
+      of (analysis?.rows || [])
+    ) {
+      if (
+        Number(row.confidence) >= 95
+      ) {
+        row.status =
+          "confirmed";
+      }
+    }
+
+    renderResults();
+  }
+
+  function updateApplyButton() {
+    const confirmed =
+      (analysis?.rows || [])
+        .some(
+          (row) =>
+            row.status === "confirmed"
+        );
+
+    $("apply").disabled =
+      !confirmed;
+  }
+
+  // ============================================================
+  // APPLY
+  // ============================================================
+
+  async function applyConfirmed() {
+    if (
+      !accessToken ||
+      !project?.id
+    ) {
+      setMessage(
+        "Open dit controlevenster vanuit de Trimble extension."
+      );
+
+      return;
+    }
+
+    setMessage(
+      "Bevestigde waarden verwerken…"
+    );
+
+    try {
+      const response =
+        await fetch(
+          `${BACKEND}/api/apply`,
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json"
+            },
+
+            body: JSON.stringify({
+              access_token:
+                accessToken,
+
+              project_id:
+                project.id,
+
+              model_name:
+                analysis.model_name,
+
+              rows:
+                analysis.rows,
+
+              confirmed_by:
+                "Trimble user"
+            })
+          }
+        );
+
+      if (!response.ok) {
+        throw new Error(
+          await response.text()
+        );
+      }
+
+      const result =
+        await response.json();
+
+      setMessage(
+        `Klaar: ${
+          result.written || 0
+        } verwerkt, ${
+          result.failed || 0
+        } fouten. Mode: ${
+          result.mode || "onbekend"
+        }`
+      );
+
+    } catch (error) {
+      setMessage(
+        error?.message ||
+        String(error)
+      );
+    }
+  }
+
+  // ============================================================
+  // HELPERS
+  // ============================================================
+
+  function setMessage(text) {
+    const element =
+      $("message");
+
+    element.textContent =
+      text || "";
+
+    element.hidden =
+      !text;
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+  }
+
+  function escapeAttribute(value) {
+    return escapeHtml(value)
+      .replaceAll('"', "&quot;");
+  }
+
 })();
