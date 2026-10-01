@@ -1,0 +1,11 @@
+body{font-family:system-ui;margin:0;background:#f4f6f8;color:#17202a}
+#app{max-width:1450px;margin:auto;padding:24px}.panel{background:#fff;border:1px solid #dfe5eb;border-radius:14px;padding:20px}
+button,.button{background:#1769aa;color:white;border:0;border-radius:8px;padding:9px 13px;text-decoration:none;cursor:pointer}
+.secondary{background:#e7edf3!important;color:#17202a!important}.muted{color:#64748b}.tabs,.actions{display:flex;gap:8px;margin:14px 0}
+.picked-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.picked{border:1px solid #e2e8f0;border-radius:9px;padding:10px}
+.picked span{display:block;color:#64748b;font-size:12px}.explorer-wrap{border:1px solid #d8e0e8;border-radius:8px;overflow:hidden}
+#trimble-explorer{width:100%;height:420px;border:0}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0}
+.summary div{background:#f8fafc;padding:10px;border-radius:8px}.summary strong{display:block;font-size:24px}.summary span{color:#64748b;font-size:12px}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse}th,td{padding:9px;border-bottom:1px solid #e5e7eb;text-align:left}
+.conf{padding:4px 7px;border-radius:999px;font-weight:700;font-size:12px}.green{background:#dcfce7;color:#166534}.amber{background:#fef3c7;color:#92400e}.red{background:#fee2e2;color:#991b1b}
+.message{background:#fff7ed;border:1px solid #fed7aa;padding:10px;border-radius:8px}.right{justify-content:flex-end}

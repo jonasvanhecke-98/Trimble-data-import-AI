@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Trimble Data Import AI</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main id="app">
+    <section class="panel">
+      <h1>Trimble Data Import AI</h1>
+      <p id="status">Applicatie laden…</p>
+      <div id="extension-ui" hidden>
+        <button id="open-companion">Open controlevenster</button>
+        <p class="muted">Sleep het controlevenster naar scherm 2.</p>
+      </div>
+      <div id="standalone-ui" hidden>
+        <p>Companion-modus.</p>
+        <div class="tabs">
+          <button id="tab-trimble" class="active">Trimble bestanden</button>
+          <button id="tab-local">Lokale fallback</button>
+        </div>
+        <section id="trimble-pane">
+          <div class="picked-grid">
+            <div class="picked"><span>IFC</span><strong id="ifc-name">Nog niet gekozen</strong></div>
+            <div class="picked"><span>PDF</span><strong id="pdf-name">Nog niet gekozen</strong></div>
+          </div>
+          <div class="explorer-wrap">
+            <div id="explorer-status" class="muted">Wachten op Trimble Connect…</div>
+            <iframe id="trimble-explorer" title="Trimble Connect bestanden"></iframe>
+          </div>
+        </section>
+        <section id="local-pane" hidden>
+          <label>IFC<input id="local-ifc" type="file" accept=".ifc"></label>
+          <label>PDF<input id="local-pdf" type="file" accept=".pdf"></label>
+        </section>
+        <div class="actions">
+          <button id="analyze" disabled>Analyseer</button>
+          <a id="excel-link" class="button secondary" href="#" target="_blank">Excel audit</a>
+        </div>
+        <div id="message" class="message" hidden></div>
+        <section id="results" hidden>
+          <div class="summary">
+            <div><strong id="count-elements">0</strong><span>IFC-elementen</span></div>
+            <div><strong id="count-assignments">0</strong><span>PDF-koppelingen</span></div>
+            <div><strong id="count-proposals">0</strong><span>Voorstellen</span></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Element</th><th>Vracht</th><th>Betrouwbaarheid</th><th>Methode</th><th>Status</th><th>3D</th></tr></thead>
+              <tbody id="results-body"></tbody>
+            </table>
+          </div>
+          <div class="actions right">
+            <button id="confirm-high" class="secondary">Bevestig ≥95%</button>
+            <button id="apply" disabled>Schrijf bevestigde waarden</button>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+  <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
